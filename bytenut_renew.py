@@ -4,111 +4,153 @@ import time
 import requests
 from seleniumbase import SB
 
-# ================= 配置与环境变量解析 =================
+# ================= Configuration & Environment Parsing =================
 
+# Account list, expected format: [{"username": "...", "password": "...", "panel_url": "..."}]
 BYTENUT_ACCOUNTS = os.environ.get('BYTENUT_ACCOUNTS', '[]')
 try:
     ACCOUNTS = json.loads(BYTENUT_ACCOUNTS)
 except json.JSONDecodeError:
-    print("❌ BYTENUT_ACCOUNTS 解析失败！")
+    print("❌ Failed to parse BYTENUT_ACCOUNTS JSON!")
     ACCOUNTS = []
 
+# Telegram Bot info, format: "bot_token,chat_id"
 TG_BOT = os.environ.get('TG_BOT', '')
+
+# GOST Proxy (the workflow should have started the proxy on port 8080)
 USE_PROXY = os.environ.get('GOST_PROXY') != ''
 PROXY_STR = "http://127.0.0.1:8080" if USE_PROXY else None
 
+# ================= Helper Functions =================
+
 def send_telegram_message(message):
+    """Send a Telegram notification."""
     print(message)
     if not TG_BOT or ',' not in TG_BOT:
         return
+    
     try:
         token, chat_id = TG_BOT.split(',', 1)
         url = f"https://api.telegram.org/bot{token.strip()}/sendMessage"
-        payload = {"chat_id": chat_id.strip(), "text": message, "parse_mode": "HTML"}
+        payload = {
+            "chat_id": chat_id.strip(),
+            "text": message,
+            "parse_mode": "HTML"
+        }
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"⚠️ Telegram 消息发送失败: {e}")
+        print(f"⚠️ Telegram message failed to send: {e}")
 
-# ================= 核心自动化逻辑 =================
+# ================= Core Automation Logic =================
 
 def login_and_renew(sb, account_info):
     username = account_info.get('username')
     password = account_info.get('password')
     panel_url = account_info.get('panel_url')
     
-    send_telegram_message(f"🔄 开始处理账号: <b>{username}</b>")
+    send_telegram_message(f"🔄 Starting account: <b>{username}</b>")
 
     try:
-        # 1. 账号密码登录
-        print("🔑 使用账号密码登录...")
+        # 1. Login with Username/Password
+        print("🔑 Logging in with password...")
         sb.open("https://bytenut.com/auth/login")
         sb.sleep(3)
         sb.type('input[placeholder="Username"]', username)
         sb.type('input[placeholder="Password"]', password)
         sb.click('button:contains("Sign In")')
-        sb.sleep(8) # 等待登录完成，防 CF 拦截
-        
-        sb.open("https://bytenut.com/free-server")
-        sb.sleep(5)
-        
+        sb.sleep(8)  # Give ample time for login and CF challenges
+
+        # Verify we aren't still on the login page
         if "/auth/login" in sb.get_current_url():
-            send_telegram_message(f"❌ 账号 {username} 密码登录失败。")
+            send_telegram_message(f"❌ Account {username} login failed.")
             sb.save_screenshot(f"login_failed_{username}.png")
             return
 
-        # 2. 跳转到指定的面板 URL
+        # 2. Go to the specified Panel URL
         if not panel_url:
-            send_telegram_message(f"⚠️ 账号 {username} 缺少 panel_url 配置，请在 Secrets 中添加。")
+            send_telegram_message(f"⚠️ Account {username} is missing panel_url. Skipped.")
             return
 
-        print(f"🎯 跳转至目标面板: {panel_url}")
+        print(f"🎯 Navigating to panel: {panel_url}")
         sb.open(panel_url)
-        sb.sleep(8) # 留足时间让 CF 验证码 iframe 加载出来
+        sb.sleep(8) # Wait for page and CF widget to load
 
-        # 3. 🛡️ 强力破解 Cloudflare 验证码
-        # Turnstile 验证码通常嵌套在特定的 iframe 中
-        cf_iframe_selector = 'iframe[src*="challenges.cloudflare.com"]'
+        # 3. 🛡️ Handle Cloudflare Turnstile Challenge
+        print("🛡️ Cloudflare Turnstile detected. Waiting for verification...")
         
-        if sb.is_element_visible(cf_iframe_selector):
-            print("🛡️ 捕捉到 Cloudflare 验证码！准备模拟人类鼠标点击...")
-            # 使用 sb.uc_click() 进行底层的、带轨迹的真实点击，专破 CF
-            sb.uc_click(cf_iframe_selector)
-            
-            # 点击后必须等待它转圈验证通过，通常需要几秒钟
-            print("⏳ 正在等待 CF 验证通过 (10秒)...")
-            sb.sleep(10)
-        else:
-            print("ℹ️ 未捕捉到需要手动点击的 CF 验证码，可能已自动绿灯放行。")
+        # Turnstile is in an iframe from challenges.cloudflare.com
+        turnstile_iframe = 'iframe[src*="challenges.cloudflare.com"]'
+        
+        # Monitor the Turnstile state (wait up to 30s)
+        verification_confirmed = False
+        start_time = time.time()
+        timeout = 30 # Seconds to wait for verification to complete
+        
+        while time.time() - start_time < timeout:
+            try:
+                # Turnstile applies a unique state to the container div in the iframe.
+                # When successful, the internal #success element becomes visible.
+                
+                # We need to check inside the iframe
+                sb.switch_to_frame(turnstile_iframe)
+                
+                # Check for an element that only appears on success (e.g., the checkmark container)
+                # This selector is a common Turnstile success indicator.
+                if sb.is_element_visible('#success-icon') or sb.is_element_visible('div.cf-success'):
+                    verification_confirmed = True
+                    break
+                
+                # Cloudflare can detect Selenium, so we need a slow check
+                sb.sleep(3)
+                print("⏳ still waiting...")
 
-        # 4. 点击续期按钮
-        extend_button_selector = 'button:contains("Extend Time")'
-        if sb.is_element_visible(extend_button_selector):
-            print("🖱️ 正在点击续期按钮...")
-            # 使用 js_click 强制点击，防止被隐形元素遮挡
-            sb.js_click(extend_button_selector)
-            sb.sleep(5)
-            
-            # 截图留证，确认点击后的页面状态
-            sb.save_screenshot(f"success_verify_{username}.png")
-            send_telegram_message(f"✅ 账号 {username} | 成功绕过 CF 并发送续期请求！")
+            except Exception as e:
+                # If we lose connection to the iframe, it might be refreshing
+                # print(f"DEBUG: Frame check failed: {e}")
+                pass
+            finally:
+                # Always switch back to the main content
+                sb.switch_to_default_content()
+
+        if verification_confirmed:
+            print("✅ Cloudflare verification successful!")
+            send_telegram_message(f"🛡️ {username} | Cloudflare verification <b>passed</b>.")
         else:
-            send_telegram_message(f"ℹ️ 账号 {username} | 续期按钮未找到。")
+            send_telegram_message(f"❌ {username} | Cloudflare verification <b>failed (timed out)</b>.")
+            sb.save_screenshot(f"cf_failed_{username}.png")
+            # If the check failed, don't even bother clicking the button; it won't work.
+            return
+
+        # 4. Find and Click the "Extend Time" Button
+        extend_button_selector = 'button:contains("Extend Time")'
+        
+        if sb.is_element_visible(extend_button_selector):
+            print("🖱️ Clicking 'Extend Time' button...")
+            sb.js_click(extend_button_selector) # Use JS click for robustness
+            sb.sleep(5)
+            send_telegram_message(f"✅ {username} | Clicked 'Extend Time' button. Waiting for server response.")
+            sb.save_screenshot(f"success_extend_click_{username}.png")
+        else:
+            send_telegram_message(f"ℹ️ {username} | 'Extend Time' button not found.")
             sb.save_screenshot(f"no_button_{username}.png")
                 
     except Exception as e:
+        # Save a screenshot on any unhandled error
         error_screenshot = f"error_{username}_{int(time.time())}.png"
         sb.save_screenshot(error_screenshot)
-        send_telegram_message(f"❌ 账号 {username} 发生异常: {str(e)[:100]}")
+        send_telegram_message(f"❌ Account {username} encountered an error: {str(e)[:100]}")
 
 def main():
     if not ACCOUNTS:
-        print("停止运行：没有配置账号。")
+        print("停止运行：没有找到账户配置。")
         return
 
-    # 保持 uc=True 开启反检测模式
+    # Use SeleniumBase's Undetected ChromeDriver (UC) mode
+    # Workflow uses xvfb-run, so we can run as headless=False inside the virtual display
     with SB(uc=True, headless=False, proxy=PROXY_STR) as sb:
         for account in ACCOUNTS:
             login_and_renew(sb, account)
+            # Short pause between accounts
             sb.sleep(3)
 
 if __name__ == "__main__":
