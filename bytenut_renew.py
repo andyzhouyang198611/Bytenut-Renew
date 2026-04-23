@@ -13,13 +13,6 @@ except json.JSONDecodeError:
     print("❌ BYTENUT_ACCOUNTS 解析失败！")
     ACCOUNTS = []
 
-BYTENUT_COOKIES_ENV = os.environ.get('BYTENUT_COOKIES', '[]')
-try:
-    COOKIES = json.loads(BYTENUT_COOKIES_ENV)
-except json.JSONDecodeError:
-    print("⚠️ BYTENUT_COOKIES 解析失败或为空，将仅使用账号密码。")
-    COOKIES = []
-
 TG_BOT = os.environ.get('TG_BOT', '')
 USE_PROXY = os.environ.get('GOST_PROXY') != ''
 PROXY_STR = "http://127.0.0.1:8080" if USE_PROXY else None
@@ -41,94 +34,66 @@ def send_telegram_message(message):
 def login_and_renew(sb, account_info):
     username = account_info.get('username')
     password = account_info.get('password')
-    panel_url = account_info.get('panel_url') # 获取直接指定的面板URL
+    panel_url = account_info.get('panel_url')
     
     send_telegram_message(f"🔄 开始处理账号: <b>{username}</b>")
 
     try:
-        is_logged_in = False
-        sb.open("https://bytenut.com/404") 
-        sb.sleep(2)
+        # 1. 账号密码登录
+        print("🔑 使用账号密码登录...")
+        sb.open("https://bytenut.com/auth/login")
+        sb.sleep(3)
+        sb.type('input[placeholder="Username"]', username)
+        sb.type('input[placeholder="Password"]', password)
+        sb.click('button:contains("Sign In")')
+        sb.sleep(8) # 等待登录完成，防 CF 拦截
         
-        # 1. 尝试 Cookie 登录
-        if COOKIES:
-            print("🍪 尝试使用 Cookie 登录...")
-            for cookie in COOKIES:
-                clean_cookie = {
-                    'name': cookie.get('name'),
-                    'value': cookie.get('value'),
-                    'domain': cookie.get('domain', '.bytenut.com'),
-                    'path': cookie.get('path', '/')
-                }
-                try:
-                    sb.add_cookie(clean_cookie)
-                except Exception:
-                    pass
-            
-            sb.open("https://bytenut.com/free-server")
-            sb.sleep(5)
-            
-            # 放宽 Cookie 验证条件：只要没被跳回登录页，就算成功
-            if "/auth/login" not in sb.get_current_url():
-                print("✅ Cookie 登录成功！")
-                is_logged_in = True
-            else:
-                print("⚠️ Cookie 失效或验证失败。")
-                sb.delete_all_cookies() 
-
-        # 2. 回退到密码登录
-        if not is_logged_in:
-            print("🔑 使用账号密码登录...")
-            sb.open("https://bytenut.com/auth/login")
-            sb.sleep(3)
-            sb.type('input[placeholder="Username"]', username)
-            sb.type('input[placeholder="Password"]', password)
-            sb.click('button:contains("Sign In")')
-            sb.sleep(8) # 加长等待时间，防止被 Cloudflare 盾拦截
-            
-            sb.open("https://bytenut.com/free-server")
-            sb.sleep(5)
-            
-            if "/auth/login" in sb.get_current_url():
-                send_telegram_message(f"❌ 账号 {username} 密码登录失败。")
-                sb.save_screenshot(f"login_failed_{username}.png") # 截图留证
-                return
-
-        # 3. 确定面板 URL 列表
-        panel_urls = []
-        if panel_url:
-            print("🎯 发现预设的面板地址，跳过抓取步骤。")
-            panel_urls = [panel_url]
-        else:
-            print("🔍 尝试抓取面板列表...")
-            panel_links = sb.find_elements('a[href*="/free-gamepanel/"]')
-            panel_urls = [link.get_attribute("href") for link in panel_links]
-
-        if not panel_urls:
-            send_telegram_message(f"⚠️ 账号 {username} 未找到可续期的免费服务器。")
-            sb.save_screenshot(f"no_servers_found_{username}.png") # 截图留证，方便看页面状态
+        sb.open("https://bytenut.com/free-server")
+        sb.sleep(5)
+        
+        if "/auth/login" in sb.get_current_url():
+            send_telegram_message(f"❌ 账号 {username} 密码登录失败。")
+            sb.save_screenshot(f"login_failed_{username}.png")
             return
 
-        # 4. 遍历并续期
-        for url in panel_urls:
-            server_id = url.split('/')[-1]
-            sb.open(url)
-            sb.sleep(6)
+        # 2. 跳转到指定的面板 URL
+        if not panel_url:
+            send_telegram_message(f"⚠️ 账号 {username} 缺少 panel_url 配置，请在 Secrets 中添加。")
+            return
 
-            if sb.is_element_visible('iframe[src*="cloudflare"]'):
-                print(f"🛡️ 发现 Cloudflare 验证，尝试自动点击...")
-                sb.uc_gui_click_captcha()
-                sb.sleep(6)
+        print(f"🎯 跳转至目标面板: {panel_url}")
+        sb.open(panel_url)
+        sb.sleep(8) # 留足时间让 CF 验证码 iframe 加载出来
 
-            extend_button_selector = 'button:contains("Extend Time")'
-            if sb.is_element_visible(extend_button_selector):
-                sb.click(extend_button_selector)
-                sb.sleep(5)
-                send_telegram_message(f"✅ 账号 {username} | 服务器 <code>{server_id}</code> 续期请求已发送！")
-                sb.save_screenshot(f"success_{server_id}.png") # 成功也截个图
-            else:
-                send_telegram_message(f"ℹ️ 账号 {username} | 服务器 <code>{server_id}</code> 暂无需续期或按钮未找到。")
-                sb.save_screenshot(f"no_button_{server_id}.png")
+        # 3. 🛡️ 强力破解 Cloudflare 验证码
+        # Turnstile 验证码通常嵌套在特定的 iframe 中
+        cf_iframe_selector = 'iframe[src*="challenges.cloudflare.com"]'
+        
+        if sb.is_element_visible(cf_iframe_selector):
+            print("🛡️ 捕捉到 Cloudflare 验证码！准备模拟人类鼠标点击...")
+            # 使用 sb.uc_click() 进行底层的、带轨迹的真实点击，专破 CF
+            sb.uc_click(cf_iframe_selector)
+            
+            # 点击后必须等待它转圈验证通过，通常需要几秒钟
+            print("⏳ 正在等待 CF 验证通过 (10秒)...")
+            sb.sleep(10)
+        else:
+            print("ℹ️ 未捕捉到需要手动点击的 CF 验证码，可能已自动绿灯放行。")
+
+        # 4. 点击续期按钮
+        extend_button_selector = 'button:contains("Extend Time")'
+        if sb.is_element_visible(extend_button_selector):
+            print("🖱️ 正在点击续期按钮...")
+            # 使用 js_click 强制点击，防止被隐形元素遮挡
+            sb.js_click(extend_button_selector)
+            sb.sleep(5)
+            
+            # 截图留证，确认点击后的页面状态
+            sb.save_screenshot(f"success_verify_{username}.png")
+            send_telegram_message(f"✅ 账号 {username} | 成功绕过 CF 并发送续期请求！")
+        else:
+            send_telegram_message(f"ℹ️ 账号 {username} | 续期按钮未找到。")
+            sb.save_screenshot(f"no_button_{username}.png")
                 
     except Exception as e:
         error_screenshot = f"error_{username}_{int(time.time())}.png"
@@ -136,10 +101,11 @@ def login_and_renew(sb, account_info):
         send_telegram_message(f"❌ 账号 {username} 发生异常: {str(e)[:100]}")
 
 def main():
-    if not ACCOUNTS and not COOKIES:
+    if not ACCOUNTS:
         print("停止运行：没有配置账号。")
         return
 
+    # 保持 uc=True 开启反检测模式
     with SB(uc=True, headless=False, proxy=PROXY_STR) as sb:
         for account in ACCOUNTS:
             login_and_renew(sb, account)
