@@ -60,13 +60,9 @@ def login_and_renew(sb, account_info):
         # 2. 打开面板页面
         print(f"🎯 跳转至目标面板: {panel_url}")
         sb.open(panel_url)
-        sb.sleep(5)
-        
-        extend_button_xpath = "//button[contains(., 'Extend Time')]"
-        # 回归最稳的单一选择器
-        cf_iframe_selector = "iframe[src*='challenges.cloudflare.com']"
+        sb.sleep(4)
 
-        # 🧹 核弹级清理底部隐私横幅，确保它绝对不会挡住鼠标
+        # 🛑 尝试清理底部隐私横幅，扫清障碍
         print("🧹 尝试清理底部隐私横幅...")
         js_remove_banner = """
         var btns = document.querySelectorAll('button');
@@ -78,75 +74,88 @@ def login_and_renew(sb, account_info):
         }
         """
         sb.execute_script(js_remove_banner)
-        sb.sleep(2)
+        sb.sleep(1)
 
-        # 3. 🎯 严格等待续期按钮
-        print("⏳ 正在严格等待续期按钮加载...")
+        # =========================================================
+        # 🛡️ 第一阶段：按照大神逻辑，优先处理 CF 验证码
+        # =========================================================
+        print("🔍 [步骤1] 等待页面加载 CF 验证码底层组件...")
+        # 只要有 CF 验证，页面必定会注入这个名字的 input 用来存 token
+        response_field = 'input[name="cf-turnstile-response"]'
+
         try:
-            sb.wait_for_element_present(extend_button_xpath, timeout=20)
-            print("✅ 续期按钮已加载。")
+            sb.wait_for_element_present(response_field, timeout=20)
         except Exception:
-            send_telegram_message(f"❌ 账号 {username} | 等待 20 秒仍未发现续期按钮。")
-            sb.save_screenshot(f"timeout_no_btn_{username}.png")
-            return
+            print("⚠️ 20秒内未发现 CF 底层组件。可能页面加载失败，或完全免检。")
 
-        # 📜 将按钮滚动到屏幕中央，顺便把上方的 CF 框拉进视野
-        print("📜 正在将按钮滚动到屏幕中央可视区域...")
-        scroll_js = f"""
-        var ele = document.evaluate("{extend_button_xpath}", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-        if(ele) {{ ele.scrollIntoView({{block: 'center'}}); }}
-        """
-        sb.execute_script(scroll_js)
-        # 必须给 CF 框留出渲染时间
-        sb.sleep(3) 
+        cf_passed = False
 
-        # 4. 🛡️ 捕捉并物理点击 CF 验证码 (致敬前辈逻辑)
-        print("🔍 启动雷达：等待 Cloudflare 验证码加载 (最长 15 秒)...")
-        cf_exists = False
-        try:
-            sb.wait_for_element_present(cf_iframe_selector, timeout=15)
-            cf_exists = True
-            print("🎯 报告！成功捕捉到验证码框！")
-        except:
-            print("⚠️ 15秒扫描未发现验证码框。")
+        if sb.is_element_present(response_field):
+            # 检查是否是 CF “隐形秒过” 模式
+            initial_token = sb.get_attribute(response_field, "value")
+            if initial_token and len(initial_token) > 10:
+                print("✅ 欧皇附体！CF 隐形验证已自动秒过，无需点击。")
+                cf_passed = True
+            else:
+                print("🛡️ 需要手动点击验证。正在将验证码滚动到屏幕正中央...")
+                # 核心修复：精准滚动到验证码的父级容器，而不是滚动续期按钮
+                sb.execute_script(f"""
+                    var ele = document.querySelector('{response_field}');
+                    if(ele && ele.parentElement) {{ ele.parentElement.scrollIntoView({{block: 'center'}}); }}
+                """)
+                sb.sleep(2) # 留出物理坐标稳定和 iframe 渲染的时间
 
-        if cf_exists:
-            print("🖱️ 正在执行物理级鼠标轨迹模拟点击...")
-            sb.sleep(1)
-            try:
-                # 方案 A：使用 SB 内置的最强反检测图形化点击
-                sb.uc_gui_click_captcha()
-            except:
-                try:
-                    # 方案 B：生成一条真实的物理鼠标轨迹并左键单击
-                    sb.uc_click(cf_iframe_selector)
-                except Exception as e:
-                    print(f"⚠️ 物理点击出现波折，可能已成功: {e}")
-            
-            print("⏳ 死守人机验证 Token (最多轮询 30 秒)...")
-            cf_passed = False
-            for i in range(15): 
-                sb.sleep(2)
-                response_field = 'input[name="cf-turnstile-response"]'
-                if sb.is_element_present(response_field):
+                # 寻找 CF 的框 (采用最广义的选择器)
+                cf_iframe = "iframe[src*='cloudflare'], iframe[title*='Cloudflare'], iframe[src*='turnstile'], iframe"
+                if sb.is_element_present(cf_iframe):
+                    print("🖱️ 正在对 CF 验证框执行物理级模拟鼠标点击...")
+                    try:
+                        sb.uc_gui_click_captcha()
+                    except:
+                        try:
+                            sb.uc_click(cf_iframe)
+                        except Exception as e:
+                            print(f"⚠️ 点击指令执行遇阻，但可能已触发: {e}")
+
+                print("⏳ 正在死守人机验证 Token (等待绿勾生成，最多 30 秒)...")
+                for i in range(15):
+                    sb.sleep(2)
                     token = sb.get_attribute(response_field, "value")
                     if token and len(token) > 10:
                         cf_passed = True
-                        print(f"✅ 第 {i*2 + 2} 秒，成功截获 Token！CF 已破解！")
+                        print(f"✅ 第 {i*2 + 2} 秒，成功截获 Token！CF 验证完美通关！")
                         break
-            
-            if not cf_passed:
-                print("⚠️ Token 获取超时。如果没报错，直接强攻续期按钮...")
-                sb.save_screenshot(f"cf_wait_timeout_{username}.png")
-        else:
-            print("ℹ️ 未检测到验证码，确认为 CF 免检状态。")
 
-        # 5. 🖱️ 最终点击续期按钮
+        # 拦截：如果确实有验证码，但死活没通过，直接终止，绝不瞎点按钮
+        if sb.is_element_present(response_field) and not cf_passed:
+            send_telegram_message(f"❌ 账号 {username} | 人机验证超时未通过，为防封控已终止操作。")
+            sb.save_screenshot(f"cf_fail_{username}.png")
+            return
+
+        # =========================================================
+        # 🎯 第二阶段：验证通关后，再去找按钮点击
+        # =========================================================
+        extend_button_xpath = "//button[contains(., 'Extend Time')]"
+        print("🔍 [步骤2] 验证已完成，正在寻找并点击续期按钮...")
+
+        try:
+            sb.wait_for_element_present(extend_button_xpath, timeout=10)
+        except Exception:
+            send_telegram_message(f"❌ 账号 {username} | 验证已过，但未找到续期按钮。")
+            sb.save_screenshot(f"no_btn_{username}.png")
+            return
+
         print("🖱️ 正在对续期按钮执行终极点击...")
+        # 此时再把续期按钮滚动过来
+        sb.execute_script(f"""
+            var ele = document.evaluate("{extend_button_xpath}", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+            if(ele) {{ ele.scrollIntoView({{block: 'center'}}); }}
+        """)
+        sb.sleep(1)
         sb.js_click(extend_button_xpath)
         sb.sleep(6)
         
-        send_telegram_message(f"✅ 账号 {username} | 续期指令执行完毕！")
+        send_telegram_message(f"✅ 账号 {username} | 完美！续期请求已发送！")
         sb.save_screenshot(f"success_final_{username}.png")
 
     except Exception as e:
