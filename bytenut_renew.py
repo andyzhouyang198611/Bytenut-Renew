@@ -61,30 +61,41 @@ def login_and_renew(sb, account_info):
         print(f"🎯 跳转至目标面板: {panel_url}")
         sb.open(panel_url)
         
-        extend_button_selector = "//button[contains(., 'Extend Time')]"
-        cf_iframe_selector = "iframe[src*='cloudflare']"
+        extend_button_xpath = "//button[contains(., 'Extend Time')]"
+        cf_iframe_xpath = "//iframe[contains(@src, 'cloudflare')]"
+        privacy_btn_xpath = "//button[contains(., 'Consent')]"
+
+        # 🛑 关键修复 1：关掉底部那个巨大的白色隐私横幅 (防止遮挡)
+        sb.sleep(3)
+        if sb.is_element_visible(privacy_btn_xpath):
+            print("🛑 发现底部隐私横幅，正在点击关闭...")
+            sb.click(privacy_btn_xpath)
+            sb.sleep(1)
 
         # 3. 🎯 严格等待续期按钮
         print("⏳ 正在严格等待核心组件 (续期按钮) 加载...")
         try:
-            sb.wait_for_element_present(extend_button_selector, timeout=20)
+            sb.wait_for_element_present(extend_button_xpath, timeout=20)
             print("✅ 续期按钮已加载。")
         except Exception:
             send_telegram_message(f"❌ 账号 {username} | 等待 20 秒后仍未发现续期按钮。")
             sb.save_screenshot(f"timeout_no_btn_{username}.png")
             return
 
-        # 居中对齐
-        btn_element = sb.find_element(extend_button_selector)
-        sb.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn_element)
+        # 📜 关键修复 2：彻底抛弃 arguments，使用纯净的 JS 字符串执行居中滚动
+        print("📜 正在将按钮滚动到屏幕中央...")
+        scroll_js = f"""
+        var ele = document.evaluate("{extend_button_xpath}", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+        if(ele) {{ ele.scrollIntoView({{block: 'center'}}); }}
+        """
+        sb.execute_script(scroll_js)
         sb.sleep(2) 
 
-        # 4. 🛡️ 强制盯防 CF 验证码 (✨ V11 核心修复区 ✨)
+        # 4. 🛡️ 强制盯防 CF 验证码 
         print("🔍 检查是否存在 Cloudflare 验证码 (主动死守最多 10 秒)...")
         cf_exists = False
         try:
-            # 放弃瞬间快照，改为长达10秒的持续监听
-            sb.wait_for_element_present(cf_iframe_selector, timeout=10)
+            sb.wait_for_element_present(cf_iframe_xpath, timeout=10)
             cf_exists = True
         except Exception:
             pass
@@ -95,9 +106,9 @@ def login_and_renew(sb, account_info):
                 sb.uc_gui_click_captcha()
             except:
                 try:
-                    sb.uc_click(cf_iframe_selector)
+                    sb.uc_click(cf_iframe_xpath)
                 except:
-                    sb.js_click(cf_iframe_selector)
+                    sb.js_click(cf_iframe_xpath)
             
             print("⏳ 正在等待人机验证 Token 生成...")
             cf_passed = False
@@ -119,7 +130,7 @@ def login_and_renew(sb, account_info):
 
         # 5. 🖱️ 最终点击
         print("🖱️ 正在点击续期按钮...")
-        sb.js_click(extend_button_selector)
+        sb.js_click(extend_button_xpath)
         sb.sleep(6)
         
         send_telegram_message(f"✅ 账号 {username} | 续期指令执行完毕！")
