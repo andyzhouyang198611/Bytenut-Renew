@@ -62,10 +62,9 @@ def login_and_renew(sb, account_info):
         sb.open(panel_url)
         
         extend_button_xpath = "//button[contains(., 'Extend Time')]"
-        cf_iframe_xpath = "//iframe[contains(@src, 'cloudflare')]"
         privacy_btn_xpath = "//button[contains(., 'Consent')]"
 
-        # 🛑 关键修复 1：关掉底部那个巨大的白色隐私横幅 (防止遮挡)
+        # 🛑 关闭底部隐私横幅
         sb.sleep(3)
         if sb.is_element_visible(privacy_btn_xpath):
             print("🛑 发现底部隐私横幅，正在点击关闭...")
@@ -82,54 +81,59 @@ def login_and_renew(sb, account_info):
             sb.save_screenshot(f"timeout_no_btn_{username}.png")
             return
 
-        # 📜 关键修复 2：彻底抛弃 arguments，使用纯净的 JS 字符串执行居中滚动
+        # 📜 将按钮滚动到屏幕中央
         print("📜 正在将按钮滚动到屏幕中央...")
         scroll_js = f"""
         var ele = document.evaluate("{extend_button_xpath}", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
         if(ele) {{ ele.scrollIntoView({{block: 'center'}}); }}
         """
         sb.execute_script(scroll_js)
-        sb.sleep(2) 
+        # ⚠️ 关键：多等3秒，给由于网络延迟缓慢加载的 CF 验证码充足的渲染时间
+        sb.sleep(3) 
 
-        # 4. 🛡️ 强制盯防 CF 验证码 
-        print("🔍 检查是否存在 Cloudflare 验证码 (主动死守最多 10 秒)...")
+        # 4. 🛡️ 主动轮询扫描 CF 验证码 (✨ V13 鹰眼扫描区 ✨)
+        print("🔍 启动主动扫描雷达：查找 Cloudflare 验证码 (手动轮询 15 秒)...")
         cf_exists = False
-        try:
-            sb.wait_for_element_present(cf_iframe_xpath, timeout=10)
-            cf_exists = True
-        except Exception:
-            pass
+        # 使用最宽泛的 CSS 选择器，彻底告别 XPath 的严格匹配陷阱
+        cf_selector = "iframe[src*='cloudflare'], iframe[src*='turnstile'], .cf-turnstile iframe"
+
+        for i in range(15):
+            if sb.is_element_present(cf_selector):
+                cf_exists = True
+                print(f"🎯 报告！在第 {i+1} 秒成功捕捉到验证码框！")
+                break
+            sb.sleep(1)
 
         if cf_exists:
-            print("🛡️ 成功捕捉到延迟加载的验证码框，准备模拟点击...")
+            print("🛡️ 准备对验证码执行拟人点击...")
+            sb.sleep(1) # 再稳一秒
             try:
                 sb.uc_gui_click_captcha()
             except:
                 try:
-                    sb.uc_click(cf_iframe_xpath)
+                    sb.uc_click(cf_selector)
                 except:
-                    sb.js_click(cf_iframe_xpath)
+                    sb.js_click(cf_selector)
             
-            print("⏳ 正在等待人机验证 Token 生成...")
+            print("⏳ 正在死守人机验证 Token 生成 (最多30秒)...")
             cf_passed = False
-            for _ in range(15): 
+            for i in range(15): 
                 sb.sleep(2)
                 response_field = 'input[name="cf-turnstile-response"]'
                 if sb.is_element_present(response_field):
                     token = sb.get_attribute(response_field, "value")
                     if token and len(token) > 10:
                         cf_passed = True
+                        print(f"✅ 第 {i*2 + 2} 秒时，Token 获取成功！")
                         break
             
-            if cf_passed:
-                print("✅ 人机验证已成功通过！")
-            else:
-                print("⚠️ 人机验证 Token 获取超时，将强行尝试点击续期...")
+            if not cf_passed:
+                print("⚠️ Token 获取超时！但这极有可能是 CF 直接隐藏放行了，将强行尝试点击续期...")
         else:
-            print("ℹ️ 10秒内未刷出 CF 验证码，假定本次直接免检通过。")
+            print("ℹ️ 15秒雷达扫描未发现验证码，确认为免检状态，直接放行。")
 
         # 5. 🖱️ 最终点击
-        print("🖱️ 正在点击续期按钮...")
+        print("🖱️ 正在对续期按钮执行 JS 强制点击...")
         sb.js_click(extend_button_xpath)
         sb.sleep(6)
         
