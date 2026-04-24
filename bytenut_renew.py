@@ -62,14 +62,16 @@ def login_and_renew(sb, account_info):
         sb.open(panel_url)
         
         extend_button_xpath = "//button[contains(., 'Extend Time')]"
-        privacy_btn_xpath = "//button[contains(., 'Consent')]"
 
-        # 🛑 关闭底部隐私横幅
-        sb.sleep(3)
-        if sb.is_element_visible(privacy_btn_xpath):
-            print("🛑 发现底部隐私横幅，正在点击关闭...")
-            sb.click(privacy_btn_xpath)
-            sb.sleep(1)
+        # 🛑 铁腕处理隐私横幅 (防止报错崩溃)
+        print("🛑 尝试清理底部隐私横幅...")
+        try:
+            # 设置极短的超时时间，找不到直接略过，绝不报错
+            if sb.is_element_visible("button:contains('Consent')", timeout=2):
+                sb.click("button:contains('Consent')", timeout=2)
+                sb.sleep(1)
+        except Exception:
+            print("ℹ️ 未发现隐私横幅或点击超时，忽略并继续。")
 
         # 3. 🎯 严格等待续期按钮
         print("⏳ 正在严格等待核心组件 (续期按钮) 加载...")
@@ -88,13 +90,11 @@ def login_and_renew(sb, account_info):
         if(ele) {{ ele.scrollIntoView({{block: 'center'}}); }}
         """
         sb.execute_script(scroll_js)
-        # ⚠️ 关键：多等3秒，给由于网络延迟缓慢加载的 CF 验证码充足的渲染时间
         sb.sleep(3) 
 
-        # 4. 🛡️ 主动轮询扫描 CF 验证码 (✨ V13 鹰眼扫描区 ✨)
-        print("🔍 启动主动扫描雷达：查找 Cloudflare 验证码 (手动轮询 15 秒)...")
+        # 4. 🛡️ 物理级模拟鼠标点击 CF 验证码 (落实大神逻辑)
+        print("🔍 启动主动扫描雷达：查找 Cloudflare 验证码 (轮询 15 秒)...")
         cf_exists = False
-        # 使用最宽泛的 CSS 选择器，彻底告别 XPath 的严格匹配陷阱
         cf_selector = "iframe[src*='cloudflare'], iframe[src*='turnstile'], .cf-turnstile iframe"
 
         for i in range(15):
@@ -105,15 +105,17 @@ def login_and_renew(sb, account_info):
             sb.sleep(1)
 
         if cf_exists:
-            print("🛡️ 准备对验证码执行拟人点击...")
-            sb.sleep(1) # 再稳一秒
+            print("🖱️ 正在执行物理级鼠标轨迹模拟点击...")
+            sb.sleep(1)
             try:
+                # 方案 A：使用底层的 GUI 鼠标滑动+点击算法破解
                 sb.uc_gui_click_captcha()
             except:
                 try:
+                    # 方案 B：直接将虚拟鼠标移动到该元素的坐标上执行原生左键单击
                     sb.uc_click(cf_selector)
-                except:
-                    sb.js_click(cf_selector)
+                except Exception as e:
+                    print(f"⚠️ 物理点击抛出警告 (可能依然成功): {e}")
             
             print("⏳ 正在死守人机验证 Token 生成 (最多30秒)...")
             cf_passed = False
@@ -124,16 +126,16 @@ def login_and_renew(sb, account_info):
                     token = sb.get_attribute(response_field, "value")
                     if token and len(token) > 10:
                         cf_passed = True
-                        print(f"✅ 第 {i*2 + 2} 秒时，Token 获取成功！")
+                        print(f"✅ 第 {i*2 + 2} 秒时，Token 获取成功！人机验证通关！")
                         break
             
             if not cf_passed:
-                print("⚠️ Token 获取超时！但这极有可能是 CF 直接隐藏放行了，将强行尝试点击续期...")
+                print("⚠️ Token 获取超时！极有可能是 CF 隐形验证放行，准备强攻续期按钮...")
         else:
             print("ℹ️ 15秒雷达扫描未发现验证码，确认为免检状态，直接放行。")
 
         # 5. 🖱️ 最终点击
-        print("🖱️ 正在对续期按钮执行 JS 强制点击...")
+        print("🖱️ 正在对续期按钮执行终极点击...")
         sb.js_click(extend_button_xpath)
         sb.sleep(6)
         
